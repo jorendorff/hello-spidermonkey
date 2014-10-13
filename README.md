@@ -1,6 +1,9 @@
 # hello-spidermonkey - A minimal JSAPI application
 
-To build this, edit the configuration section of the Makefile and then:
+To build this, you must first
+[build SpiderMonkey itself](https://developer.mozilla.org/en-US/docs/Mozilla/Projects/SpiderMonkey/Build_Documentation#Developer_%28debug%29_build).
+
+Then, edit the configuration section of the hello-spidermonkey Makefile. And then:
 
     make hellojs
 
