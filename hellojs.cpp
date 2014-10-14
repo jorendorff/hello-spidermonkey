@@ -1,3 +1,16 @@
+/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 4 -*-
+ * vim: set ts=8 sts=4 et sw=4 tw=99:
+ * This Source Code Form is subject to the terms of the Mozilla Public
+ * License, v. 2.0. If a copy of the MPL was not distributed with this
+ * file, You can obtain one at http://mozilla.org/MPL/2.0/.
+ *
+ * hellojs.cpp - A bare-bones JSAPI application.
+ *
+ * This is intended as introductory documentation to the JSAPI.
+ * The JSAPI User Guide explains what's going on here in detail:
+ * <https://developer.mozilla.org/en-US/docs/Mozilla/Projects/SpiderMonkey/JSAPI_User_Guide>
+ */
+
 #include <stdlib.h>
 #include <stdio.h>
 #include "jsapi.h"
@@ -20,19 +33,23 @@ static JSClass globalClass = {
 };
 
 // The error reporter callback.
-void reportError(JSContext *cx, const char *message, JSErrorReport *report) {
+void
+reportError(JSContext *cx, const char *message, JSErrorReport *report)
+{
      fprintf(stderr, "%s:%u:%s\n",
              report->filename ? report->filename : "[no filename]",
              (unsigned int) report->lineno,
              message);
 }
 
-// myjs_rand - A simple example of a JSNative.
+// === Custom functions
 //
-// This is how you implement functions in C++ that can be called from JS code.
-// This particular one is about as simple as possible: it calls the standard C
+// The next three functions are examples of how you can implement functions in
+// C++ that can be called from JS. All such functions have the same signature;
+// this type of function is called a JSNative.
+
+// myjs_rand - A very basic example of a JSNative. It calls the standard C
 // function rand() and returns the result.
-//
 bool
 myjs_rand(JSContext *cx, unsigned argc, Value *vp)
 {
@@ -40,7 +57,7 @@ myjs_rand(JSContext *cx, unsigned argc, Value *vp)
     // how you access the arguments passed from JS and set the return value.
     JS::CallArgs args = JS::CallArgsFromVp(argc, vp);
 
-    // Do the work this function is supposed to do, in this case just call the
+    // Do the work this function is supposed to do. In this case just call the
     // rand() function.
     int result = rand();
 
@@ -58,8 +75,8 @@ myjs_rand(JSContext *cx, unsigned argc, Value *vp)
     return true;
 }
 
-// myjs_srand - Another example JSNative function. Perhaps you can decipher
-// this one on your own.
+// myjs_srand - Another example JSNative function. Maybe you can decipher this
+// one on your own.
 bool
 myjs_srand(JSContext *cx, unsigned argc, Value *vp)
 {
@@ -78,29 +95,65 @@ myjs_srand(JSContext *cx, unsigned argc, Value *vp)
 bool
 myjs_system(JSContext *cx, unsigned argc, Value *vp)
 {
-    CallArgs args = CallArgsFromVp(argc, vp);
+    JS::CallArgs args = JS::CallArgsFromVp(argc, vp);
 
-    RootedString cmd(cx);
-    cmd = ToString(cx, args.get(0));
-    if (!cmd)
+    // Temporary variable to hold a string we're about to create.
+    // Variables must be "Rooted" to protect their values from GC.
+    JS::RootedString cmd(cx);
+
+    // Convert the argument passed by the user (which could be any JS::Value--
+    // a string, number, boolean, object, or something else) to a string.
+    cmd = JS::ToString(cx, args.get(0));
+    if (!cmd) {
+        // If we get here, JS::ToString returned null. That means some kind of
+        // error occurred while converting the argument to a string. Most
+        // likely, the argument was an object, and its .toString() method threw
+        // an exception.  But it could be something else -- maybe we ran out of
+        // memory, for example.
+        //
+        // In any case, it's a good thing we checked that return value! Now we
+        // can gracefully propagate that error on to our caller, like so:
         return false;
 
-    char *cmdBytes = JS_EncodeString(cx, cmd);
-    if (!cmdBytes)
+        // If we hadn't checked, we would have crashed the next time we tried
+        // to do anything with cmd. The moral: Always check return values.
+        // Seriously, do it. Don't be lazy. You're better than that.
+    }
+
+    // One more hurdle: JS strings have 16-bit characters. The 'system()'
+    // function expects 8-bit characters. We have to convert. We'll use UTF-8,
+    // so this function will handle Unicode input correctly on Mac and
+    // Linux. On Windows, alas, Unicode will be garbled. (You could work around
+    // that using an #ifdef and some Windows-specific code.)
+    char *cmdBytes = JS_EncodeStringToUTF8(cx, cmd);
+    if (!cmdBytes)  // <-- eternal error-checking vigilance!
         return false;
 
-    int rc = system(cmdBytes);
+    // Actually do the work we came here to do.
+    int status = system(cmdBytes);
+
+    // The documentation for JS_EncodeStringToUTF8 says that the caller (that's
+    // us) is responsible for freeing the buffer.
     JS_free(cx, cmdBytes);
-    if (rc != 0) {
-        // Throw a JavaScript exception.
-        JS_ReportError(cx, "Command failed with status code %d", rc);
+
+    // When system() returns nonzero, that means the command failed somehow.
+    if (status != 0) {
+        // Set up a JavaScript exception and return false.
+        JS_ReportError(cx, "Command failed with status code %d", status);
         return false;
     }
+
+    // Success!
     args.rval().setUndefined();
     return true;
 }
 
-// An array of all our global functions and their names.
+// An array of all our JSNatives and their names. We'll pass this table to
+// JS_DefineFunctions below.
+//
+// (The third argument to JS_FS is the argument count: rand.length will be 0
+// and srand.length will be 1. The fourth argument is a "flags" argument,
+// almost always 0.)
 static JSFunctionSpec myjs_global_functions[] = {
     JS_FS("rand",   myjs_rand,   0, 0),
     JS_FS("srand",  myjs_srand,  1, 0),
@@ -108,23 +161,29 @@ static JSFunctionSpec myjs_global_functions[] = {
     JS_FS_END
 };
 
+
+// === The main program
+
+// run - Create a global object, populate it with standard library functions,
+// and then run some JS code at last!
 bool
 run(JSContext *cx, const char *code)
 {
-    // Enter a request before running anything in the context.
+    // Enter a request before trying to do anything in the context.  Sorry,
+    // this is a bit of an API wart. Not every function needs this: if your
+    // caller has a JSAutoRequest, you don't need one.
     JSAutoRequest ar(cx);
 
     // Create the global object and a new compartment.
     RootedObject global(cx);
-    global = JS_NewGlobalObject(cx, &globalClass, nullptr,
-                                JS::FireOnNewGlobalHook);
+    global = JS_NewGlobalObject(cx, &globalClass, nullptr, JS::FireOnNewGlobalHook);
     if (!global)
         return false;
 
     // Enter the new global object's compartment.
     JSAutoCompartment ac(cx, global);
 
-    // Populate the global object with the standard globals, like Object and
+    // Populate the global object with the JS standard library, like Object and
     // Array.
     if (!JS_InitStandardClasses(cx, global))
         return false;
@@ -134,9 +193,7 @@ run(JSContext *cx, const char *code)
     if (!JS_DefineFunctions(cx, global, myjs_global_functions))
         return false;
 
-    // Your application code here. This may include JSAPI calls to create your
-    // own custom JS objects and run scripts. Here we'll just run the code
-    // provided by the caller.
+    // Run the code provided by the caller!
     RootedValue rval(cx);
     if (!JS_EvaluateScript(cx, global, code, strlen(code), "<command line>", 1, &rval))
         return false;
@@ -151,7 +208,9 @@ const char *usage =
     "  srand(seed) - seed the random number generator\n"
     "  system(cmd) - run a command\n";
 
-int main(int argc, const char *argv[]) {
+int
+main(int argc, const char *argv[])
+{
     if (argc != 2) {
         fputs(usage, stderr);
         return 1;
@@ -172,14 +231,13 @@ int main(int argc, const char *argv[]) {
        return 1;
     JS_SetErrorReporter(rt, reportError);
 
-    // Now run the code provided on the command line.  If it succeeds, we'll
-    // exit with a status code of 0; otherwise 1 to indicate an error.
-    int exitCode = run(cx, argv[1]) ? 0 : 1;
+    // Run the code supplied on the command line.
+    bool success = run(cx, argv[1]);
 
     // Shut everything down.
     JS_DestroyContext(cx);
     JS_DestroyRuntime(rt);
     JS_ShutDown();
 
-    return exitCode;
+    return success ? 0 : 1;
 }
